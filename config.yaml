@@ -1,0 +1,18 @@
+# Copyright 2022 Canonical Ltd.
+# See LICENSE file for licensing details.
+#
+# Learn more about config at: https://juju.is/docs/sdk/config
+
+options:
+
+  email:
+    type: string
+    default: ""
+    description: |
+      The email used to get the certificate for.
+
+  agree-tos:
+    type: boolean
+    default: false
+    description: |
+      Whether or not the user agrees with the Let's Encrypt Terms of Service.

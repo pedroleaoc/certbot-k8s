@@ -1,0 +1,21 @@
+# Copyright 2022 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: certbot-k8s
+display-name: Cerbot Charm
+
+summary: |
+  Charm used for generating CA-signed certificates.
+
+description: |
+  This charm uses certbot in order to generate CA-signed certificates. For this,
+  it will set up an Ingress route for the HTTP challenge.
+
+containers:
+  certbot-nginx:
+    resource: certbot-nginx-image
+
+resources:
+  certbot-nginx-image:
+    type: oci-image
+    description: OCI image for certbot-nginx (claudiubelu/certbot-nginx:0.1.0)
