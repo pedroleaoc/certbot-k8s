@@ -16,3 +16,9 @@ options:
     default: false
     description: |
       Whether or not the user agrees with the Let's Encrypt Terms of Service.
+
+  service-hostname:
+    type: string
+    default: ""
+    description: |
+      The hostname to create the certificate for.

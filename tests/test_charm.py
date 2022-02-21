@@ -3,9 +3,12 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
+import base64
+import os
 import unittest
 from unittest import mock
 
+import kubernetes.client
 from ops import model, testing
 
 import charm
@@ -58,7 +61,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
         # Ensure we set an ActiveStatus with no message.
         self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
-    def test_config_changed(self):
+    @mock.patch.object(charm.CertbotK8sCharm, "_ensure_certificate")
+    def test_config_changed(self, mock_ensure_certificate):
         # Check that the Waiting Status is set if Pebble is not ready yet.
         container = self.harness.model.unit.get_container("certbot-nginx")
         mock_connect = self._patch(container, "can_connect", return_value=False)
@@ -66,7 +70,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.harness.begin_with_initial_hooks()
         self.assertIsInstance(self.harness.model.unit.status, model.WaitingStatus)
 
-        # Pebble is not ready. There are no initial configurations, the Charm should be blocked.
+        # Pebble is now ready. There are no initial configurations, the Charm should be blocked.
         mock_connect.return_value = True
         self.harness.charm.on.certbot_nginx_pebble_ready.emit(container)
         expected_status = model.BlockedStatus("Please configure an email.")
@@ -80,6 +84,90 @@ class TestCertbotK8sCharm(unittest.TestCase):
         )
         self.assertEqual(self.harness.model.unit.status, expected_status)
 
-        # Agree to the Terms of Service and expect the charm to be Active.
+        # Agree to the Terms of Service. The Charm encounters a 403 error because it's not
+        # trusted. The Charm should be blocked.
+        mock_ensure_certificate.side_effect = kubernetes.client.exceptions.ApiException(status=403)
         self.harness.update_config({"agree-tos": True})
+
+        expected_status = model.BlockedStatus(
+            "Insufficient permissions, try `juju trust %s --scope=cluster`"
+            % self.harness.charm.app.name
+        )
+        self.assertEqual(self.harness.model.unit.status, expected_status)
+
+        # If the Charm is trusted, it should now be Active.
+        mock_ensure_certificate.side_effect = None
+        self.harness.charm.on.config_changed.emit()
         self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
+
+    @mock.patch("charm._core_v1_api")
+    def test_create_certificate(self, mock_api):
+        # Initialize the Charm and add the necessary configuration for it to become Active.
+        self.harness.begin_with_initial_hooks()
+        self.harness.charm._authed = True
+        self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
+        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
+
+        # We did not configure the service-hostname yet, so it shouldn't have checked if the
+        # secret already exists.
+        mock_api.assert_not_called()
+
+        # Configure the service-hostname, but the secret already exists. It should not create a
+        # certificate afterwards.
+        mock_secret = mock.Mock()
+        mock_secret.metadata.name = "foo-lish-tls"
+        mock_list_secrets = mock_api.return_value.list_namespaced_secret
+        mock_list_secrets.return_value.items = [mock_secret]
+        container = self.harness.model.unit.get_container("certbot-nginx")
+        mock_exec = self._patch(container, "exec")
+        mock_pull = self._patch(container, "pull")
+
+        self.harness.update_config({"service-hostname": "foo.lish"})
+
+        mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
+        mock_exec.assert_not_called()
+
+        # Test certificate creation.
+        mock_list_secrets.return_value.items = []
+        mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
+        self.harness.update_config({"service-hostname": "foo.li.sh"})
+
+        command = [
+            "certbot",
+            "certonly",
+            "--agree-tos",
+            "-n",
+            "-m",
+            self.harness.model.config["email"],
+            "-d",
+            "foo.li.sh",
+            "--webroot",
+            "--webroot-path",
+            charm._NGINX_WEBROOT,
+        ]
+        mock_exec.assert_called_once_with(command)
+
+        base_path = os.path.join(charm._LETS_ENCRYPT_BASE_DIR, "foo.li.sh")
+        mock_pull.assert_has_calls(
+            [
+                mock.call(os.path.join(base_path, "fullchain.pem")),
+                mock.call(os.path.join(base_path, "privkey.pem")),
+            ],
+        )
+
+        expected_body = kubernetes.client.V1Secret(
+            api_version="v1",
+            kind="Secret",
+            type="kubernetes.io/tls",
+            metadata=kubernetes.client.V1ObjectMeta(
+                name="foo-li-sh-tls",
+            ),
+            data={
+                "tls.crt": base64.b64encode("some_cert".encode("utf-8")).decode("utf-8"),
+                "tls.key": base64.b64encode("some_key".encode("utf-8")).decode("utf-8"),
+            },
+        )
+        mock_api.return_value.create_namespaced_secret.assert_called_once_with(
+            namespace=self.harness.charm._namespace,
+            body=expected_body,
+        )
