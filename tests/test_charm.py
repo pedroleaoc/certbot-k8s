@@ -27,14 +27,23 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
         return mock_patched
 
+    def _add_relation(self, relation_name, relator_name, relation_data):
+        """Adds a relation to the charm."""
+        relation_id = self.harness.add_relation(relation_name, relator_name)
+        self.harness.add_relation_unit(relation_id, "%s/0" % relator_name)
+
+        self.harness.update_relation_data(relation_id, relator_name, relation_data)
+        return relation_id
+
     def test_certbot_nginx_pebble_ready(self):
         # Check the initial Pebble plan is empty.
         initial_plan = self.harness.get_container_pebble_plan("certbot-nginx")
         self.assertEqual(initial_plan.to_yaml(), "{}\n")
 
-        # Set the configurations needed by the Charm.
+        # Set the configurations and relations needed by the Charm.
         self.harness.begin_with_initial_hooks()
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
+        self._add_relation("ingress", "nginx-ingress-integrator", {})
 
         # Get the nginx-certbot container from the model and emit PebbleEventReady.
         container = self.harness.model.unit.get_container("certbot-nginx")
@@ -70,8 +79,15 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.harness.begin_with_initial_hooks()
         self.assertIsInstance(self.harness.model.unit.status, model.WaitingStatus)
 
-        # Pebble is now ready. There are no initial configurations, the Charm should be blocked.
+        # Pebble is now ready, but there is no Ingress relation.
         mock_connect.return_value = True
+        self.harness.charm.on.certbot_nginx_pebble_ready.emit(container)
+        expected_status = model.BlockedStatus("Needs an ingress relation.")
+        self.assertEqual(self.harness.model.unit.status, expected_status)
+
+        # Add the Ingress relation. There are no initial configurations, the Charm should be
+        # blocked.
+        self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.charm.on.certbot_nginx_pebble_ready.emit(container)
         expected_status = model.BlockedStatus("Please configure an email.")
         self.assertEqual(self.harness.model.unit.status, expected_status)
@@ -100,11 +116,15 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.harness.charm.on.config_changed.emit()
         self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
+    @mock.patch("requests.get")
     @mock.patch("charm._core_v1_api")
-    def test_create_certificate(self, mock_api):
-        # Initialize the Charm and add the necessary configuration for it to become Active.
+    def test_create_certificate(self, mock_api, mock_get):
+        # Initialize the Charm and add the necessary configuration and relation for it to
+        # become Active.
+        self.harness.set_leader(True)
         self.harness.begin_with_initial_hooks()
         self.harness.charm._authed = True
+        self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
         self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
@@ -121,16 +141,38 @@ class TestCertbotK8sCharm(unittest.TestCase):
         container = self.harness.model.unit.get_container("certbot-nginx")
         mock_exec = self._patch(container, "exec")
         mock_pull = self._patch(container, "pull")
+        mock_push = self._patch(container, "push")
 
         self.harness.update_config({"service-hostname": "foo.lish"})
 
         mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
         mock_exec.assert_not_called()
 
-        # Test certificate creation.
+        # Test certificate creation. On the first run, it's going to only set the service-hostname
+        # into the relation data and then the event is deferred.
         mock_list_secrets.return_value.items = []
         mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
         self.harness.update_config({"service-hostname": "foo.li.sh"})
+
+        expected_path = os.path.join("/usr/share/nginx/html/.well-known/acme-challenge/foo.test")
+        mock_push.assert_called_once_with(
+            path=expected_path, source="ignore me", encoding="utf-8", make_dirs=True
+        )
+        mock_exec.assert_not_called()
+
+        # Reemit the config update event, it should check that the test file is reachable.
+        mock_response = mock_get.return_value
+        mock_response.status_code = 404
+        self.harness.charm.on.config_changed.emit()
+
+        mock_get.assert_called_once_with(
+            "http://foo.li.sh%s/foo.test" % charm._ACME_CHALLENGE_ROUTE
+        )
+        mock_exec.assert_not_called()
+
+        # Reemit the config update event, it should now create the certificate.
+        mock_response.status_code = 200
+        self.harness.charm.on.config_changed.emit()
 
         command = [
             "certbot",
@@ -171,3 +213,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
             namespace=self.harness.charm._namespace,
             body=expected_body,
         )
+
+        # The service-hostname in the relation data should have been reset.
+        relation = self.harness.model.get_relation("ingress")
+        svc_hostname = relation.data[self.harness.charm.app]["service-hostname"]
+        self.assertEqual(self.harness.charm.app.name, svc_hostname)

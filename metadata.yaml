@@ -11,6 +11,10 @@ description: |
   This charm uses certbot in order to generate CA-signed certificates. For this,
   it will set up an Ingress route for the HTTP challenge.
 
+requires:
+  ingress:
+    interface: ingress
+
 containers:
   certbot-nginx:
     resource: certbot-nginx-image

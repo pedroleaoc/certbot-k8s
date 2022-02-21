@@ -12,6 +12,8 @@ import os
 import re
 
 import kubernetes.client
+import requests
+from charms.nginx_ingress_integrator.v0 import ingress
 from ops import charm, main, model
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 _SECRET_NAME_REGEX = re.compile("[^0-9a-zA-Z]")
 _NGINX_WEBROOT = "/usr/share/nginx/html"
 _LETS_ENCRYPT_BASE_DIR = "/etc/letsencrypt/live"
+_ACME_CHALLENGE_ROUTE = "/.well-known/acme-challenge"
 
 
 def _core_v1_api():
@@ -33,6 +36,17 @@ class CertbotK8sCharm(charm.CharmBase):
 
     def __init__(self, *args):
         super().__init__(*args)
+
+        # Setup Ingress.
+        self.ingress = ingress.IngressRequires(
+            self,
+            {
+                "service-hostname": self.app.name,
+                "service-name": self.app.name,
+                "service-port": 80,
+                "path-routes": _ACME_CHALLENGE_ROUTE,
+            },
+        )
 
         # General hooks:
         self.framework.observe(
@@ -66,13 +80,13 @@ class CertbotK8sCharm(charm.CharmBase):
 
         self._refresh_charm_status(container)
 
-    def _on_config_changed(self, _):
+    def _on_config_changed(self, event):
         """Refreshes the service config."""
         is_active = self._refresh_charm_status()
 
         try:
             if is_active:
-                self._ensure_certificate(self.model.config["service-hostname"])
+                self._ensure_certificate(event, self.model.config["service-hostname"])
         except kubernetes.client.exceptions.ApiException as ex:
             if ex.status == 403:
                 logger.error(
@@ -101,6 +115,10 @@ class CertbotK8sCharm(charm.CharmBase):
             self.unit.status = model.WaitingStatus("Waiting for Pebble to be ready.")
             return False
 
+        if not self.model.get_relation("ingress"):
+            self.unit.status = model.BlockedStatus("Needs an ingress relation.")
+            return False
+
         if not self.model.config["email"]:
             self.unit.status = model.BlockedStatus("Please configure an email.")
             return False
@@ -115,7 +133,7 @@ class CertbotK8sCharm(charm.CharmBase):
         self.unit.status = model.ActiveStatus()
         return True
 
-    def _ensure_certificate(self, hostname):
+    def _ensure_certificate(self, event, hostname):
         if not hostname:
             # Nothing to do.
             return
@@ -126,8 +144,50 @@ class CertbotK8sCharm(charm.CharmBase):
         if self._secret_exists(secret_name):
             return
 
+        if self._setup_ingress_route(hostname):
+            logger.debug(
+                "Set the '%s' hostname for the Ingress route for the HTTP challenge.", hostname
+            )
+            event.defer()
+            return
+
+        if not self._check_ingress_route(hostname):
+            logger.warning("Can't reach the test file in the ACME Challenge Route.")
+            event.defer()
+            return
+
         cert, key = self._create_certificate(hostname)
         self._create_secret(secret_name, cert, key)
+
+        # After we've generated the certificate, teardown the Ingress route we've set up.
+        self.ingress.update_config({"service-hostname": self.app.name})
+
+    def _setup_ingress_route(self, hostname):
+        ingress_relation = self.model.get_relation("ingress")
+        relation_updated = ingress_relation.data[self.app].get("service-hostname") != hostname
+        self.ingress.update_config({"service-hostname": hostname})
+        self._setup_ingress_check_file()
+
+        return relation_updated
+
+    def _setup_ingress_check_file(self):
+        """Sets up a test file in the ACME Challenge Route folder.
+
+        In order for Let's Encrypt to verify our ownership of the service-hostname we're
+        requiring, we need to solve its HTTP Challenge. For that, it expects that a special
+        token is reachable under <svc_hostname>/.well-known/acme-challenge. We are setting up
+        an Ingress Route for it. This method will create a test file under that path, so we can
+        ensure that the Ingress Route is properly set up before attempting to solve the challenge.
+        """
+        test_file = os.path.join(_NGINX_WEBROOT, _ACME_CHALLENGE_ROUTE[1:], "foo.test")
+        container = self.unit.get_container("certbot-nginx")
+        container.push(path=test_file, source="ignore me", encoding="utf-8", make_dirs=True)
+
+    def _check_ingress_route(self, hostname):
+        url = "http://%s%s/foo.test" % (hostname, _ACME_CHALLENGE_ROUTE)
+        response = requests.get(url)
+
+        return response.status_code == 200
 
     def _create_certificate(self, hostname):
         """Creates the CA-verified certificate."""
@@ -146,8 +206,14 @@ class CertbotK8sCharm(charm.CharmBase):
             _NGINX_WEBROOT,
         ]
 
+        if self.model.config["dry-run"]:
+            command.append("--dry-run")
+
         process = container.exec(command)
         process.wait_output()
+
+        if self.model.config["dry-run"]:
+            return "fake-cert", "fake-key"
 
         base_path = os.path.join(_LETS_ENCRYPT_BASE_DIR, hostname)
         cert_file = container.pull(os.path.join(base_path, "fullchain.pem"))

@@ -22,3 +22,9 @@ options:
     default: ""
     description: |
       The hostname to create the certificate for.
+
+  dry-run:
+    type: boolean
+    default: false
+    description: |
+      Create a mock certificate.
