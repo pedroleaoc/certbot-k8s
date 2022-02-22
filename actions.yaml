@@ -1,0 +1,9 @@
+# Copyright 2022 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+get-secret-name:
+  description: |
+    Returns a string representing the Kubernetes secret name in which the
+    CA-verified certificate is registered in. The secret name can be used
+    as a config option for the nginx-ingress-integrator charm.
+    If the certificate is not created, an empty string is returned instead.

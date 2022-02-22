@@ -54,6 +54,9 @@ class CertbotK8sCharm(charm.CharmBase):
         )
         self.framework.observe(self.on.config_changed, self._on_config_changed)
 
+        # Actions:
+        self.framework.observe(self.on.get_secret_name_action, self._on_get_secret_name_action)
+
     def _on_certbot_nginx_pebble_ready(self, event):
         """Define and start the certbot-nginx Pebble Layer."""
         # Get a reference the container attribute on the PebbleReadyEvent
@@ -98,6 +101,29 @@ class CertbotK8sCharm(charm.CharmBase):
                 )
             else:
                 raise
+
+    def _on_get_secret_name_action(self, event):
+        """Gets the Kubernetes Secret name in which the Certificate is saved in.
+
+        The Kubernetes Secret will contain the certificate generated for the currently
+        configured service-hostname. If the certificate does not exist for any reason (missing
+        config options, Charm is not trusted, the ACME Challenge failed, etc.), then this
+        action will result in an error.
+        """
+        email = self.model.config["email"]
+        agree_tos = self.model.config["agree-tos"]
+        hostname = self.model.config["service-hostname"]
+        if not all([email, agree_tos]):
+            raise Exception("Required configuration options are not set. Check the charm status.")
+
+        if not hostname:
+            raise Exception("service-hostname is not set.")
+
+        secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
+        if not self._secret_exists(secret_name):
+            raise Exception("Secret for '%s' does not exist." % hostname)
+
+        event.set_results({"result": secret_name})
 
     def _refresh_charm_status(self, container=None):
         """Updates the Charm status.

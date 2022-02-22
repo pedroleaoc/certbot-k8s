@@ -218,3 +218,39 @@ class TestCertbotK8sCharm(unittest.TestCase):
         relation = self.harness.model.get_relation("ingress")
         svc_hostname = relation.data[self.harness.charm.app]["service-hostname"]
         self.assertEqual(self.harness.charm.app.name, svc_hostname)
+
+    @mock.patch("charm._core_v1_api")
+    def test_get_secret_name_action(self, mock_api):
+        mock_event = mock.Mock()
+        self.harness.set_leader(True)
+        self.harness.begin_with_initial_hooks()
+        self.harness.charm._authed = True
+
+        # The email, agree-tos, service-hostname config options are not set, which means that
+        # there is no certificate to get.
+        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+
+        self.harness.update_config({"email": "foo@lish"})
+        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+
+        self.harness.update_config({"agree-tos": True})
+        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+
+        # Setting the service-hostname config option. Test the case in which the secret does
+        # not exist, in which case an Exception should be raised.
+        mock_list_secrets = mock_api.return_value.list_namespaced_secret
+        mock_list_secrets.return_value.items = []
+        self.harness.update_config({"service-hostname": "foo.lish"})
+
+        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+        mock_list_secrets.assert_called_once_with(namespace=self.harness.model.name)
+
+        # The secret now exists. The action should now succeed.
+        mock_secret = mock.Mock()
+        fake_secret_name = "foo-lish-tls"
+        mock_secret.metadata.name = fake_secret_name
+        mock_list_secrets.return_value.items = [mock_secret]
+
+        self.harness.charm._on_get_secret_name_action(mock_event)
+
+        mock_event.set_results.assert_called_once_with({"result": fake_secret_name})
