@@ -18,6 +18,7 @@ from ops import charm, main, model
 
 logger = logging.getLogger(__name__)
 
+_INGRESS_RELATION_NAME = "ingress"
 _SECRET_NAME_REGEX = re.compile("[^0-9a-zA-Z]")
 _NGINX_WEBROOT = "/usr/share/nginx/html"
 _LETS_ENCRYPT_BASE_DIR = "/etc/letsencrypt/live"
@@ -46,6 +47,16 @@ class CertbotK8sCharm(charm.CharmBase):
                 "service-port": 80,
                 "path-routes": _ACME_CHALLENGE_ROUTE,
             },
+        )
+
+        # Ingress relation hooks.
+        # This will also update the Charm Status appropriately (if multiple ingresses are added
+        # by mistake, the Charm will be in a Blocked Status).
+        self.framework.observe(
+            self.on[_INGRESS_RELATION_NAME].relation_joined, self._on_config_changed
+        )
+        self.framework.observe(
+            self.on[_INGRESS_RELATION_NAME].relation_broken, self._on_config_changed
         )
 
         # General hooks:
@@ -141,8 +152,13 @@ class CertbotK8sCharm(charm.CharmBase):
             self.unit.status = model.WaitingStatus("Waiting for Pebble to be ready.")
             return False
 
-        if not self.model.get_relation("ingress"):
+        ingresses = self.model.relations["ingress"]
+        if not ingresses:
             self.unit.status = model.BlockedStatus("Needs an ingress relation.")
+            return False
+
+        if len(ingresses) > 1:
+            self.unit.status = model.BlockedStatus("Too many ingress relations.")
             return False
 
         if not self.model.config["email"]:

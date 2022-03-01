@@ -85,9 +85,15 @@ class TestCertbotK8sCharm(unittest.TestCase):
         expected_status = model.BlockedStatus("Needs an ingress relation.")
         self.assertEqual(self.harness.model.unit.status, expected_status)
 
-        # Add the Ingress relation. There are no initial configurations, the Charm should be
-        # blocked.
+        # Add too many Ingress relations. It should be in Blocked State because of this.
         self._add_relation("ingress", "nginx-ingress-integrator", {})
+        rel_id2 = self._add_relation("ingress", "nginx-ingress-integrator", {})
+        expected_status = model.BlockedStatus("Too many ingress relations.")
+        self.assertEqual(self.harness.model.unit.status, expected_status)
+
+        # Leave only one Ingress relation. There are no initial configurations, the Charm should be
+        # blocked.
+        self.harness.remove_relation(rel_id2)
         self.harness.charm.on.certbot_nginx_pebble_ready.emit(container)
         expected_status = model.BlockedStatus("Please configure an email.")
         self.assertEqual(self.harness.model.unit.status, expected_status)
