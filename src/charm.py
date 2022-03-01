@@ -10,6 +10,7 @@ import base64
 import logging
 import os
 import re
+import socket
 
 import kubernetes.client
 import requests
@@ -186,6 +187,12 @@ class CertbotK8sCharm(charm.CharmBase):
         if self._secret_exists(secret_name):
             return
 
+        if not self._resolve_hostname(hostname):
+            msg = "Cannot resolve hostname: '%s'" % hostname
+            self.unit.status = model.BlockedStatus(msg)
+            logger.debug(msg)
+            return
+
         if self._setup_ingress_route(hostname):
             msg = "Setting up an Ingress Route for %s's HTTP Challenge." % hostname
             self.unit.status = model.WaitingStatus(msg)
@@ -208,6 +215,16 @@ class CertbotK8sCharm(charm.CharmBase):
         # After we've generated the certificate, teardown the Ingress route we've set up.
         self.ingress.update_config({"service-hostname": self.app.name})
         self.unit.status = model.ActiveStatus()
+
+    def _resolve_hostname(self, hostname):
+        """Checks whether the hostname is resolvable or not."""
+        try:
+            socket.gethostbyname(hostname)
+        except socket.error as e:
+            logger.warning("Encountered error while resolving hostname %s: %s", hostname, e)
+            return 0
+
+        return 1
 
     def _setup_ingress_route(self, hostname):
         ingress_relation = self.model.get_relation("ingress")

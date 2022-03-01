@@ -5,6 +5,7 @@
 
 import base64
 import os
+import socket
 import unittest
 from unittest import mock
 
@@ -124,7 +125,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
     @mock.patch("requests.get")
     @mock.patch("charm._core_v1_api")
-    def test_create_certificate(self, mock_api, mock_get):
+    @mock.patch("socket.gethostbyname")
+    def test_create_certificate(self, mock_gethost, mock_api, mock_get):
         # Initialize the Charm and add the necessary configuration and relation for it to
         # become Active.
         self.harness.set_leader(True)
@@ -155,9 +157,17 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
         mock_exec.assert_not_called()
 
+        # Test the hostname not resolvable scenario. The Charm should end up in a Blocked Status.
+        mock_list_secrets.return_value.items = []
+        mock_gethost.side_effect = socket.error
+
+        self.harness.update_config({"service-hostname": "lish"})
+        msg = "Cannot resolve hostname: 'lish'"
+        self.assertEqual(self.harness.model.unit.status, model.BlockedStatus(msg))
+
         # Test certificate creation. On the first run, it's going to only set the service-hostname
         # into the relation data and then the event is deferred.
-        mock_list_secrets.return_value.items = []
+        mock_gethost.side_effect = None
         mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
         self.harness.update_config({"service-hostname": "foo.li.sh"})
 
