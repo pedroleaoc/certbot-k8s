@@ -145,6 +145,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
         self.harness.update_config({"service-hostname": "foo.lish"})
 
+        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
         mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
         mock_exec.assert_not_called()
 
@@ -154,6 +155,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
         self.harness.update_config({"service-hostname": "foo.li.sh"})
 
+        msg = "Setting up an Ingress Route for foo.li.sh's HTTP Challenge."
+        self.assertEqual(self.harness.model.unit.status, model.WaitingStatus(msg))
         expected_path = os.path.join("/usr/share/nginx/html/.well-known/acme-challenge/foo.test")
         mock_push.assert_called_once_with(
             path=expected_path, source="ignore me", encoding="utf-8", make_dirs=True
@@ -165,6 +168,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_response.status_code = 404
         self.harness.charm.on.config_changed.emit()
 
+        msg = "Cannot reach test file using Ingress Route. Retrying."
+        self.assertEqual(self.harness.model.unit.status, model.WaitingStatus(msg))
         mock_get.assert_called_once_with(
             "http://foo.li.sh%s/foo.test" % charm._ACME_CHALLENGE_ROUTE
         )
@@ -174,6 +179,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_response.status_code = 200
         self.harness.charm.on.config_changed.emit()
 
+        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
         command = [
             "certbot",
             "certonly",

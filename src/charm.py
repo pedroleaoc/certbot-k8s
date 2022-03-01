@@ -171,22 +171,27 @@ class CertbotK8sCharm(charm.CharmBase):
             return
 
         if self._setup_ingress_route(hostname):
-            logger.debug(
-                "Set the '%s' hostname for the Ingress route for the HTTP challenge.", hostname
-            )
+            msg = "Setting up an Ingress Route for %s's HTTP Challenge." % hostname
+            self.unit.status = model.WaitingStatus(msg)
+            logger.debug(msg)
             event.defer()
             return
 
         if not self._check_ingress_route(hostname):
-            logger.warning("Can't reach the test file in the ACME Challenge Route.")
+            msg = "Cannot reach test file using Ingress Route. Retrying."
+            self.unit.status = model.WaitingStatus(msg)
+            logger.warning(msg)
             event.defer()
             return
 
+        msg = "Generating CA-verified certificate for %s" % hostname
+        self.unit.status = model.WaitingStatus(msg)
         cert, key = self._create_certificate(hostname)
         self._create_secret(secret_name, cert, key)
 
         # After we've generated the certificate, teardown the Ingress route we've set up.
         self.ingress.update_config({"service-hostname": self.app.name})
+        self.unit.status = model.ActiveStatus()
 
     def _setup_ingress_route(self, hostname):
         ingress_relation = self.model.get_relation("ingress")
