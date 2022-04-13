@@ -2,11 +2,9 @@ name: Publish Charm
 
 on:
   workflow_dispatch:
-  pull_request:
+  push:
     branches:
-      - test
-    types:
-      - closed
+      - main
 
 jobs:
   publish-charm:
@@ -18,14 +16,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check libraries
-        uses: canonical/charming-actions/check-libraries@1.0.0
+        uses: canonical/charming-actions/check-libraries@1.0.2
         with:
           credentials: "${{ secrets.CHARMHUB_TOKEN }}"
           github-token: "${{ secrets.GITHUB_TOKEN }}"
       - name: Upload charm to charmhub
-        # TODO: update the upload-charm step once the following PR merges:
-        # https://github.com/canonical/charming-actions/pull/33
-        uses: sanchezfdezjavier/charming-actions/upload-charm@fix-upload-image-false
+        uses: canonical/charming-actions/upload-charm@1.0.2
         with:
           credentials: "${{ secrets.CHARMHUB_TOKEN }}"
           github-token: "${{ secrets.GITHUB_TOKEN }}"

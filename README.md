@@ -60,7 +60,11 @@ This charm requires an ``ingress`` relation, typically provided by the ``nginx-i
 
 ## OCI Images
 
-The image used by this charm is ``claudiubelu/certbot-nginx:0.1.0``, which is based on the ``nginx`` Docker image, and has ``certbot`` installed. Details on how to build your image can be found [here](docker/README.md).
+The image used by this charm is uploaded as a charm resource into charmhub and deployed automatically with the charm. The image is based on the ``nginx`` Docker image, and has ``certbot`` installed. Details on how to build your image can be found [here](docker/README.md).
+
+## Charm releases
+
+This repository is configured to automatically build and publish a new Charm revision after a Pull Request merges. For more information, see [here](docs/CharmPublishing.md).
 
 ## Contributing
 
