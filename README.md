@@ -13,7 +13,7 @@ This Charm requires you to have a publicly available DNS hostname, which is mean
 To deploy this charm, simply run:
 
 ```bash
-juju deploy --trust cerbot-k8s --channel=edge
+juju deploy --trust certbot-k8s --channel=edge
 ```
 
 Next, this charm will require a relation with an ``nginx-ingress-integrator`` charm, which will be used to automatically set up the Ingress Route required in order to solve the CA's ACME HTTP Challenge, which is required in proving the ownership of the hostname you're generating the certificate for.
@@ -22,7 +22,7 @@ To deploy the ``nginx-ingress-integrator`` charm and relate it to the ``certbot-
 
 ```bash
 juju deploy --trust nginx-ingress-integrator
-juju relate cerbot-k8s nginx-ingress-integrator
+juju relate certbot-k8s nginx-ingress-integrator
 ```
 
 Next, you need to configure the email and agree with the [Terms of Service](https://letsencrypt.org/repository/) needed to use the Let's Encrypt CA:
@@ -53,6 +53,11 @@ juju config another-nginx-ingress-integrator tls-secret-name=$SECRET_NAME
 
 The command above will configure Ingress-level TLS termination.
 
+```bash
+juju run-action certbot-k8s/0 renew-certificate
+```
+
+The above command will generate a new certificate for the hostname you specified.
 
 ## Relations
 

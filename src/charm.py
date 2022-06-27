@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import socket
+import time
 
 import kubernetes.client
 import requests
@@ -30,6 +31,9 @@ def _core_v1_api():
     """Use the V1 Kubernetes API."""
     return kubernetes.client.CoreV1Api()
 
+class CertbotK8sException(Exception):
+    """Custom exception class for CertbotK8s."""
+    pass
 
 class CertbotK8sCharm(charm.CharmBase):
     """A Juju Charm for generating CA-signed Certificates using certbot."""
@@ -68,6 +72,8 @@ class CertbotK8sCharm(charm.CharmBase):
 
         # Actions:
         self.framework.observe(self.on.get_secret_name_action, self._on_get_secret_name_action)
+
+        self.framework.observe(self.on.renew_certificate_action, self._on_renew_certificate_action)
 
     def _on_certbot_nginx_pebble_ready(self, event):
         """Define and start the certbot-nginx Pebble Layer."""
@@ -114,6 +120,36 @@ class CertbotK8sCharm(charm.CharmBase):
             else:
                 raise
 
+    def _on_renew_certificate_action(self, event):
+        """Renew the certificate for the currently configured service-hostname."""
+        hostname = self.model.config["service-hostname"]
+
+        if not hostname:
+            raise CertbotK8sException("service-hostname is not set.")
+
+        if not self._resolve_hostname(hostname):
+            raise CertbotK8sException("Cannot resolve hostname: '%s'" % hostname)
+
+        if self._setup_ingress_route(hostname):
+            logger.debug("Setting up an Ingress Route for %s's HTTP Challenge." % hostname)
+            # Check ingress route is ready every 5 seconds for up to 60 seconds.
+            for i in range(0, 60):
+                if self._check_ingress_route(hostname):
+                    break
+                time.sleep(5)
+            else:
+                raise CertbotK8sException("Cannot reach test file using Ingress Route.")
+
+        secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
+        try:
+            self._generate_certificate_and_secret(hostname, secret_name)
+            event.set_results({"result": "Certificate renewed for %s" % hostname})
+        except Exception as ex:
+            # Teardown the Ingress route we've set up,
+            # even if we failed to generate the certificate.
+            self.ingress.update_config({"service-hostname": self.app.name})
+            raise ex
+
     def _on_get_secret_name_action(self, event):
         """Gets the Kubernetes Secret name in which the Certificate is saved in.
 
@@ -126,14 +162,14 @@ class CertbotK8sCharm(charm.CharmBase):
         agree_tos = self.model.config["agree-tos"]
         hostname = self.model.config["service-hostname"]
         if not all([email, agree_tos]):
-            raise Exception("Required configuration options are not set. Check the charm status.")
+            raise CertbotK8sException("Required configuration options are not set. Check the charm status.")
 
         if not hostname:
-            raise Exception("service-hostname is not set.")
+            raise CertbotK8sException("service-hostname is not set.")
 
         secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
         if not self._secret_exists(secret_name):
-            raise Exception("Secret for '%s' does not exist." % hostname)
+            raise CertbotK8sException("Secret for '%s' does not exist." % hostname)
 
         event.set_results({"result": secret_name})
 
@@ -207,14 +243,19 @@ class CertbotK8sCharm(charm.CharmBase):
             event.defer()
             return
 
-        msg = "Generating CA-verified certificate for %s" % hostname
-        self.unit.status = model.WaitingStatus(msg)
+        self.unit.status = model.WaitingStatus(
+            "Generating CA-verified certificate for %s" % hostname
+        )
+        self._generate_certificate_and_secret(hostname, secret_name)
+        self.unit.status = model.ActiveStatus()
+
+    def _generate_certificate_and_secret(self, hostname, secret_name):
+        """Generates a certificate for the given hostname and saves it in a Kubernetes Secret."""
         cert, key = self._create_certificate(hostname)
         self._create_secret(secret_name, cert, key)
 
         # After we've generated the certificate, teardown the Ingress route we've set up.
         self.ingress.update_config({"service-hostname": self.app.name})
-        self.unit.status = model.ActiveStatus()
 
     def _resolve_hostname(self, hostname):
         """Checks whether the hostname is resolvable or not."""
@@ -313,10 +354,17 @@ class CertbotK8sCharm(charm.CharmBase):
             },
         )
 
-        api.create_namespaced_secret(
-            namespace=self._namespace,
-            body=body,
-        )
+        if self._secret_exists(secret_name):
+            api.replace_namespaced_secret(
+                name=secret_name,
+                namespace=self._namespace,
+                body=body,
+            )
+        else:
+            api.create_namespaced_secret(
+                namespace=self._namespace,
+                body=body,
+            )
         logger.info("Created secret '%s' in namespace %s", secret_name, self._namespace)
 
     @property
