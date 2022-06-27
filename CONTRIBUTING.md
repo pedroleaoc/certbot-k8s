@@ -57,7 +57,7 @@ juju deploy ./certbot-k8s_ubuntu-20.04-amd64.charm --resource certbot-nginx-imag
 If it was already deployed, you can simply refresh it:
 
 ```bash
-juju refresh --path=./certbot-k8s_ubuntu-20.04-amd64.charm
+juju refresh certbot-k8s --path=./certbot-k8s_ubuntu-20.04-amd64.charm
 ```
 
 Doing a ``juju refresh`` / ``juju upgrade-charm`` has the benefit of keeping any configurations or relations added previously.

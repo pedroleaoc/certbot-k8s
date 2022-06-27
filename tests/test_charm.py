@@ -241,6 +241,119 @@ class TestCertbotK8sCharm(unittest.TestCase):
         svc_hostname = relation.data[self.harness.charm.app]["service-hostname"]
         self.assertEqual(self.harness.charm.app.name, svc_hostname)
 
+    @mock.patch("time.sleep")
+    @mock.patch.object(charm.CertbotK8sCharm, "_generate_certificate_and_secret")
+    @mock.patch.object(charm.CertbotK8sCharm, "_check_ingress_route")
+    @mock.patch.object(charm.CertbotK8sCharm, "_setup_ingress_route")
+    @mock.patch.object(charm.CertbotK8sCharm, "_resolve_hostname")
+    @mock.patch("charm._core_v1_api")
+    def test_renew_certificate(
+        self,
+        mock_api,
+        mock_resolve_host,
+        mock_setup_ingress,
+        mock_check_ingress,
+        mock_generate_cert,
+        mock_sleep,
+    ):
+        # Initialize the Charm and add the necessary configuration and relation for it to
+        # become Active.
+        self.harness.set_leader(True)
+        self.harness.begin_with_initial_hooks()
+        self.harness.charm._authed = True
+        self._add_relation("ingress", "nginx-ingress-integrator", {})
+        self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
+        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
+
+        mock_event = mock.Mock()
+
+        with self.assertRaises(charm.CertbotK8sException) as cm:
+            self.harness.charm._on_renew_certificate_action(mock_event)
+
+        self.assertEqual("service-hostname is not set.", str(cm.exception))
+
+        self.harness.update_config({"service-hostname": "service.com"})
+
+        # The hostname is not resolvable.
+        mock_resolve_host.return_value = False
+
+        with self.assertRaises(charm.CertbotK8sException) as cm:
+            self.harness.charm._on_renew_certificate_action(mock_event)
+
+        self.assertEqual("Cannot resolve hostname: 'service.com'", str(cm.exception))
+
+        # The hostname is now resolvable.
+        mock_resolve_host.return_value = True
+
+        # configure the secrets
+        mock_secret = mock.Mock()
+        mock_secret.metadata.name = "foo-lish-tls"
+        mock_list_secrets = mock_api.return_value.list_namespaced_secret
+        mock_list_secrets.return_value.items = [mock_secret]
+
+        # Configure trying to setup ingress route, but it fails.
+        mock_setup_ingress.return_value = True
+        mock_check_ingress.return_value = False
+
+        with self.assertRaises(charm.CertbotK8sException) as cm:
+            self.harness.charm._on_renew_certificate_action(mock_event)
+
+        mock_resolve_host.assert_called_with("service.com")
+        mock_setup_ingress.assert_called_with("service.com")
+        mock_check_ingress.assert_called_with("service.com")
+
+        # check if check_ingress_route was called 60 times, since we mock the sleep function
+        self.assertEqual(mock_check_ingress.call_count, 60)
+
+        # the route check should fail after 60 times
+        self.assertEqual("Cannot reach test file using Ingress Route.", str(cm.exception))
+
+        # Configure trying to setup ingress route, but it succeeds.
+        mock_check_ingress.return_value = True
+        self.harness.charm._on_renew_certificate_action(mock_event)
+
+        mock_generate_cert.assert_called_once_with("service.com", "service-com-tls")
+
+        mock_event.set_results.assert_called_once_with(
+            {"result": "Certificate renewed for service.com"}
+        )
+
+        # If the certificate generation fails, the action should fail with the same error.
+        mock_generate_cert.side_effect = kubernetes.client.exceptions.ApiException(status=403)
+
+        self.assertRaises(
+            kubernetes.client.exceptions.ApiException,
+            self.harness.charm._on_renew_certificate_action,
+            mock_event,
+        )
+
+    @mock.patch("charm._core_v1_api")
+    @mock.patch.object(charm.CertbotK8sCharm, "_create_certificate")
+    def test_generate_certificate_and_secret(self, mock_create_cert, mock_api):
+        self.harness.set_leader(True)
+        self.harness.begin_with_initial_hooks()
+        self.harness.charm._authed = True
+        self._add_relation("ingress", "nginx-ingress-integrator", {})
+        self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
+
+        mock_create_cert.return_value = ("some_cert", "some_key")
+
+        secret_name = "service-com-tls"
+
+        # The secret should be created, since we don't have one.
+        mock_api.return_value.list_namespaced_secret.return_value.items = []
+        self.harness.charm._generate_certificate_and_secret("service.com", secret_name)
+        mock_api.return_value.create_namespaced_secret.assert_called_once()
+
+        # The secret should be replaced, since we have one.
+        mock_secret = mock.Mock()
+        mock_secret.metadata.name = secret_name
+        mock_api.return_value.list_namespaced_secret.return_value.items = [mock_secret]
+        self.harness.charm._generate_certificate_and_secret("service.com", secret_name)
+        mock_api.return_value.replace_namespaced_secret.assert_called_once_with(
+            name=secret_name, namespace=self.harness.model.name, body=mock.ANY
+        )
+
     @mock.patch("charm._core_v1_api")
     def test_get_secret_name_action(self, mock_api):
         mock_event = mock.Mock()
@@ -250,13 +363,13 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
         # The email, agree-tos, service-hostname config options are not set, which means that
         # there is no certificate to get.
-        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
 
         self.harness.update_config({"email": "foo@lish"})
-        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
 
         self.harness.update_config({"agree-tos": True})
-        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
 
         # Setting the service-hostname config option. Test the case in which the secret does
         # not exist, in which case an Exception should be raised.
@@ -264,7 +377,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_list_secrets.return_value.items = []
         self.harness.update_config({"service-hostname": "foo.lish"})
 
-        self.assertRaises(Exception, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
         mock_list_secrets.assert_called_once_with(namespace=self.harness.model.name)
 
         # The secret now exists. The action should now succeed.
