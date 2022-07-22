@@ -31,9 +31,12 @@ def _core_v1_api():
     """Use the V1 Kubernetes API."""
     return kubernetes.client.CoreV1Api()
 
-class CertbotK8sException(Exception):
+
+class CertbotK8sError(Exception):
     """Custom exception class for CertbotK8s."""
+
     pass
+
 
 class CertbotK8sCharm(charm.CharmBase):
     """A Juju Charm for generating CA-signed Certificates using certbot."""
@@ -125,10 +128,10 @@ class CertbotK8sCharm(charm.CharmBase):
         hostname = self.model.config["service-hostname"]
 
         if not hostname:
-            raise CertbotK8sException("service-hostname is not set.")
+            raise CertbotK8sError("service-hostname is not set.")
 
         if not self._resolve_hostname(hostname):
-            raise CertbotK8sException("Cannot resolve hostname: '%s'" % hostname)
+            raise CertbotK8sError("Cannot resolve hostname: '%s'" % hostname)
 
         if self._setup_ingress_route(hostname):
             logger.debug("Setting up an Ingress Route for %s's HTTP Challenge." % hostname)
@@ -138,7 +141,7 @@ class CertbotK8sCharm(charm.CharmBase):
                     break
                 time.sleep(5)
             else:
-                raise CertbotK8sException("Cannot reach test file using Ingress Route.")
+                raise CertbotK8sError("Cannot reach test file using Ingress Route.")
 
         secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
         try:
@@ -162,14 +165,16 @@ class CertbotK8sCharm(charm.CharmBase):
         agree_tos = self.model.config["agree-tos"]
         hostname = self.model.config["service-hostname"]
         if not all([email, agree_tos]):
-            raise CertbotK8sException("Required configuration options are not set. Check the charm status.")
+            raise CertbotK8sError(
+                "Required configuration options are not set. Check the charm status."
+            )
 
         if not hostname:
-            raise CertbotK8sException("service-hostname is not set.")
+            raise CertbotK8sError("service-hostname is not set.")
 
         secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
         if not self._secret_exists(secret_name):
-            raise CertbotK8sException("Secret for '%s' does not exist." % hostname)
+            raise CertbotK8sError("Secret for '%s' does not exist." % hostname)
 
         event.set_results({"result": secret_name})
 
