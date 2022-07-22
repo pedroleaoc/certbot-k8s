@@ -267,7 +267,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
         mock_event = mock.Mock()
 
-        with self.assertRaises(charm.CertbotK8sException) as cm:
+        with self.assertRaises(charm.CertbotK8sError) as cm:
             self.harness.charm._on_renew_certificate_action(mock_event)
 
         self.assertEqual("service-hostname is not set.", str(cm.exception))
@@ -277,7 +277,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         # The hostname is not resolvable.
         mock_resolve_host.return_value = False
 
-        with self.assertRaises(charm.CertbotK8sException) as cm:
+        with self.assertRaises(charm.CertbotK8sError) as cm:
             self.harness.charm._on_renew_certificate_action(mock_event)
 
         self.assertEqual("Cannot resolve hostname: 'service.com'", str(cm.exception))
@@ -295,7 +295,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_setup_ingress.return_value = True
         mock_check_ingress.return_value = False
 
-        with self.assertRaises(charm.CertbotK8sException) as cm:
+        with self.assertRaises(charm.CertbotK8sError) as cm:
             self.harness.charm._on_renew_certificate_action(mock_event)
 
         mock_resolve_host.assert_called_with("service.com")
@@ -363,13 +363,19 @@ class TestCertbotK8sCharm(unittest.TestCase):
 
         # The email, agree-tos, service-hostname config options are not set, which means that
         # there is no certificate to get.
-        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(
+            charm.CertbotK8sError, self.harness.charm._on_get_secret_name_action, mock_event
+        )
 
         self.harness.update_config({"email": "foo@lish"})
-        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(
+            charm.CertbotK8sError, self.harness.charm._on_get_secret_name_action, mock_event
+        )
 
         self.harness.update_config({"agree-tos": True})
-        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(
+            charm.CertbotK8sError, self.harness.charm._on_get_secret_name_action, mock_event
+        )
 
         # Setting the service-hostname config option. Test the case in which the secret does
         # not exist, in which case an Exception should be raised.
@@ -377,7 +383,9 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_list_secrets.return_value.items = []
         self.harness.update_config({"service-hostname": "foo.lish"})
 
-        self.assertRaises(charm.CertbotK8sException, self.harness.charm._on_get_secret_name_action, mock_event)
+        self.assertRaises(
+            charm.CertbotK8sError, self.harness.charm._on_get_secret_name_action, mock_event
+        )
         mock_list_secrets.assert_called_once_with(namespace=self.harness.model.name)
 
         # The secret now exists. The action should now succeed.
