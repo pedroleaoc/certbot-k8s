@@ -72,7 +72,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
     @mock.patch.object(charm.CertbotK8sCharm, "_ensure_certificate")
-    def test_config_changed(self, mock_ensure_certificate):
+    @mock.patch.object(charm.CertbotK8sCharm, "_setup_ingress_route")
+    def test_config_changed(self, mock_setup_route, mock_ensure_certificate):
         # Check that the Waiting Status is set if Pebble is not ready yet.
         container = self.harness.model.unit.get_container("certbot-nginx")
         mock_connect = self._patch(container, "can_connect", return_value=False)
@@ -107,10 +108,17 @@ class TestCertbotK8sCharm(unittest.TestCase):
         )
         self.assertEqual(self.harness.model.unit.status, expected_status)
 
-        # Agree to the Terms of Service. The Charm encounters a 403 error because it's not
-        # trusted. The Charm should be blocked.
-        mock_ensure_certificate.side_effect = kubernetes.client.exceptions.ApiException(status=403)
+        # Agree to the Terms of Service.
+        # On the first run, the charm should set up the ingress route. The event has to be defered
+        # in order for the ingress relation data to get updated.
+        mock_setup_route.return_value = True
         self.harness.update_config({"agree-tos": True})
+        mock_ensure_certificate.assert_not_called()
+
+        # The Charm encounters a 403 error because it's not trusted. The Charm should be blocked.
+        mock_setup_route.return_value = False
+        mock_ensure_certificate.side_effect = kubernetes.client.exceptions.ApiException(status=403)
+        self.harness.charm.on.config_changed.emit()
 
         expected_status = model.BlockedStatus(
             "Insufficient permissions, try `juju trust %s --scope=cluster`"
@@ -134,7 +142,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.harness.charm._authed = True
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
-        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
         # We did not configure the service-hostname yet, so it shouldn't have checked if the
         # secret already exists.
@@ -143,7 +150,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         # Configure the service-hostname, but the secret already exists. It should not create a
         # certificate afterwards.
         mock_secret = mock.Mock()
-        mock_secret.metadata.name = "foo-lish-tls"
+        mock_secret.metadata.name = "foo-li-sh-tls"
         mock_list_secrets = mock_api.return_value.list_namespaced_secret
         mock_list_secrets.return_value.items = [mock_secret]
         container = self.harness.model.unit.get_container("certbot-nginx")
@@ -151,24 +158,8 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_pull = self._patch(container, "pull")
         mock_push = self._patch(container, "push")
 
-        self.harness.update_config({"service-hostname": "foo.lish"})
-
-        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
-        mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
-        mock_exec.assert_not_called()
-
-        # Test the hostname not resolvable scenario. The Charm should end up in a Blocked Status.
-        mock_list_secrets.return_value.items = []
-        mock_gethost.side_effect = socket.error
-
-        self.harness.update_config({"service-hostname": "lish"})
-        msg = "Cannot resolve hostname: 'lish'"
-        self.assertEqual(self.harness.model.unit.status, model.BlockedStatus(msg))
-
-        # Test certificate creation. On the first run, it's going to only set the service-hostname
-        # into the relation data and then the event is deferred.
-        mock_gethost.side_effect = None
-        mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
+        # On the first run, it's going to only set the service-hostname into the relation data
+        # and then the event is deferred.
         self.harness.update_config({"service-hostname": "foo.li.sh"})
 
         msg = "Setting up an Ingress Route for foo.li.sh's HTTP Challenge."
@@ -179,7 +170,23 @@ class TestCertbotK8sCharm(unittest.TestCase):
         )
         mock_exec.assert_not_called()
 
+        # The secret already exists, the charm should become Active.
+        self.harness.charm.on.config_changed.emit()
+
+        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
+        mock_list_secrets.assert_called_once_with(namespace=self.harness.charm._namespace)
+        mock_exec.assert_not_called()
+
+        # Test the hostname not resolvable scenario. The Charm should end up in a Blocked Status.
+        mock_list_secrets.return_value.items = []
+        mock_gethost.side_effect = socket.error
+
+        self.harness.charm.on.config_changed.emit()
+        msg = "Cannot resolve hostname: 'foo.li.sh'"
+        self.assertEqual(self.harness.model.unit.status, model.BlockedStatus(msg))
+
         # Reemit the config update event, it should check that the test file is reachable.
+        mock_gethost.side_effect = None
         mock_response = mock_get.return_value
         mock_response.status_code = 404
         self.harness.charm.on.config_changed.emit()
@@ -192,6 +199,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_exec.assert_not_called()
 
         # Reemit the config update event, it should now create the certificate.
+        mock_pull.return_value.read.side_effect = ["some_cert", "some_key"]
         mock_response.status_code = 200
         self.harness.charm.on.config_changed.emit()
 
@@ -236,12 +244,11 @@ class TestCertbotK8sCharm(unittest.TestCase):
             body=expected_body,
         )
 
-        # The service-hostname in the relation data should have been reset.
+        # The service-hostname in the relation data should NOT have been reset.
         relation = self.harness.model.get_relation("ingress")
         svc_hostname = relation.data[self.harness.charm.app]["service-hostname"]
-        self.assertEqual(self.harness.charm.app.name, svc_hostname)
+        self.assertEqual("foo.li.sh", svc_hostname)
 
-    @mock.patch("time.sleep")
     @mock.patch.object(charm.CertbotK8sCharm, "_generate_certificate_and_secret")
     @mock.patch.object(charm.CertbotK8sCharm, "_check_ingress_route")
     @mock.patch.object(charm.CertbotK8sCharm, "_setup_ingress_route")
@@ -254,7 +261,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_setup_ingress,
         mock_check_ingress,
         mock_generate_cert,
-        mock_sleep,
     ):
         # Initialize the Charm and add the necessary configuration and relation for it to
         # become Active.
@@ -263,7 +269,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self.harness.charm._authed = True
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
-        self.assertEqual(self.harness.model.unit.status, model.ActiveStatus())
 
         mock_event = mock.Mock()
 
@@ -301,9 +306,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
         mock_resolve_host.assert_called_with("service.com")
         mock_setup_ingress.assert_called_with("service.com")
         mock_check_ingress.assert_called_with("service.com")
-
-        # check if check_ingress_route was called 60 times, since we mock the sleep function
-        self.assertEqual(mock_check_ingress.call_count, 60)
 
         # the route check should fail after 60 times
         self.assertEqual("Cannot reach test file using Ingress Route.", str(cm.exception))

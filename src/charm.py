@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import socket
-import time
 
 import kubernetes.client
 import requests
@@ -50,10 +49,11 @@ class CertbotK8sCharm(charm.CharmBase):
         self.ingress = ingress.IngressRequires(
             self,
             {
-                "service-hostname": self.app.name,
+                "service-hostname": self.model.config["service-hostname"] or self.app.name,
                 "service-name": self.app.name,
                 "service-port": 80,
                 "path-routes": _ACME_CHALLENGE_ROUTE,
+                "rewrite-enabled": False,
             },
         )
 
@@ -107,10 +107,22 @@ class CertbotK8sCharm(charm.CharmBase):
     def _on_config_changed(self, event):
         """Refreshes the service config."""
         is_active = self._refresh_charm_status()
+        if not is_active:
+            return
+
+        # If the service-hostname config option changed, we need to defer the event, so the
+        # ingress relation data has a chance to get updated.
+        hostname = self.model.config["service-hostname"]
+        ingress_configured = self._setup_ingress_route(hostname)
+        if ingress_configured:
+            msg = "Setting up an Ingress Route for %s's HTTP Challenge." % hostname
+            self.unit.status = model.WaitingStatus(msg)
+            logger.debug(msg)
+            event.defer()
+            return
 
         try:
-            if is_active:
-                self._ensure_certificate(event, self.model.config["service-hostname"])
+            self._ensure_certificate(event, hostname)
         except kubernetes.client.exceptions.ApiException as ex:
             if ex.status == 403:
                 logger.error(
@@ -133,15 +145,8 @@ class CertbotK8sCharm(charm.CharmBase):
         if not self._resolve_hostname(hostname):
             raise CertbotK8sError("Cannot resolve hostname: '%s'" % hostname)
 
-        if self._setup_ingress_route(hostname):
-            logger.debug("Setting up an Ingress Route for %s's HTTP Challenge." % hostname)
-            # Check ingress route is ready every 5 seconds for up to 60 seconds.
-            for i in range(0, 60):
-                if self._check_ingress_route(hostname):
-                    break
-                time.sleep(5)
-            else:
-                raise CertbotK8sError("Cannot reach test file using Ingress Route.")
+        if not self._check_ingress_route(hostname):
+            raise CertbotK8sError("Cannot reach test file using Ingress Route.")
 
         secret_name = "%s-tls" % _SECRET_NAME_REGEX.sub("-", hostname)
         try:
@@ -234,13 +239,6 @@ class CertbotK8sCharm(charm.CharmBase):
             logger.debug(msg)
             return
 
-        if self._setup_ingress_route(hostname):
-            msg = "Setting up an Ingress Route for %s's HTTP Challenge." % hostname
-            self.unit.status = model.WaitingStatus(msg)
-            logger.debug(msg)
-            event.defer()
-            return
-
         if not self._check_ingress_route(hostname):
             msg = "Cannot reach test file using Ingress Route. Retrying."
             self.unit.status = model.WaitingStatus(msg)
@@ -258,9 +256,6 @@ class CertbotK8sCharm(charm.CharmBase):
         """Generates a certificate for the given hostname and saves it in a Kubernetes Secret."""
         cert, key = self._create_certificate(hostname)
         self._create_secret(secret_name, cert, key)
-
-        # After we've generated the certificate, teardown the Ingress route we've set up.
-        self.ingress.update_config({"service-hostname": self.app.name})
 
     def _resolve_hostname(self, hostname):
         """Checks whether the hostname is resolvable or not."""
