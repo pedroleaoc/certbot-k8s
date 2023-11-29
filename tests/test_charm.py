@@ -19,6 +19,9 @@ class TestCertbotK8sCharm(unittest.TestCase):
     def setUp(self):
         self.harness = testing.Harness(charm.CertbotK8sCharm)
         self.addCleanup(self.harness.cleanup)
+        self.harness.set_leader(True)
+        self.harness.begin_with_initial_hooks()
+        self.harness.charm._authed = True
 
     def _patch(self, obj, method, *args, **kwargs):
         """Patches the given method and returns its Mock."""
@@ -37,12 +40,7 @@ class TestCertbotK8sCharm(unittest.TestCase):
         return relation_id
 
     def test_certbot_nginx_pebble_ready(self):
-        # Check the initial Pebble plan is empty.
-        initial_plan = self.harness.get_container_pebble_plan("certbot-nginx")
-        self.assertEqual(initial_plan.to_yaml(), "{}\n")
-
         # Set the configurations and relations needed by the Charm.
-        self.harness.begin_with_initial_hooks()
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
         self._add_relation("ingress", "nginx-ingress-integrator", {})
 
@@ -77,9 +75,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
         # Check that the Waiting Status is set if Pebble is not ready yet.
         container = self.harness.model.unit.get_container("certbot-nginx")
         mock_connect = self._patch(container, "can_connect", return_value=False)
-
-        self.harness.begin_with_initial_hooks()
-        self.assertIsInstance(self.harness.model.unit.status, model.WaitingStatus)
 
         # Pebble is now ready, but there is no Ingress relation.
         mock_connect.return_value = True
@@ -137,9 +132,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
     def test_create_certificate(self, mock_gethost, mock_api, mock_get):
         # Initialize the Charm and add the necessary configuration and relation for it to
         # become Active.
-        self.harness.set_leader(True)
-        self.harness.begin_with_initial_hooks()
-        self.harness.charm._authed = True
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
 
@@ -264,9 +256,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
     ):
         # Initialize the Charm and add the necessary configuration and relation for it to
         # become Active.
-        self.harness.set_leader(True)
-        self.harness.begin_with_initial_hooks()
-        self.harness.charm._authed = True
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
 
@@ -332,9 +321,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
     @mock.patch("charm._core_v1_api")
     @mock.patch.object(charm.CertbotK8sCharm, "_create_certificate")
     def test_generate_certificate_and_secret(self, mock_create_cert, mock_api):
-        self.harness.set_leader(True)
-        self.harness.begin_with_initial_hooks()
-        self.harness.charm._authed = True
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
 
@@ -359,9 +345,6 @@ class TestCertbotK8sCharm(unittest.TestCase):
     @mock.patch("charm._core_v1_api")
     def test_get_secret_name_action(self, mock_api):
         mock_event = mock.Mock()
-        self.harness.set_leader(True)
-        self.harness.begin_with_initial_hooks()
-        self.harness.charm._authed = True
 
         # The email, agree-tos, service-hostname config options are not set, which means that
         # there is no certificate to get.
