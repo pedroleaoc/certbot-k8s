@@ -15,7 +15,7 @@ import socket
 import kubernetes.client
 import requests
 from charms.nginx_ingress_integrator.v0 import ingress
-from ops import charm, main, model
+from ops import charm, main, model, pebble
 
 logger = logging.getLogger(__name__)
 
@@ -79,30 +79,38 @@ class CertbotK8sCharm(charm.CharmBase):
         self.framework.observe(self.on.renew_certificate_action, self._on_renew_certificate_action)
 
     def _on_certbot_nginx_pebble_ready(self, event):
-        """Define and start the certbot-nginx Pebble Layer."""
         # Get a reference the container attribute on the PebbleReadyEvent
         container = event.workload
+        self._ensure_pebble_layer(container)
+        self._refresh_charm_status(container)
+
+    def _ensure_pebble_layer(self, container=None):
+        """Define and start the certbot-nginx Pebble Layer."""
+        # If not provided with a container, get one.
+        container = container or self.unit.get_container("certbot-nginx")
 
         # Define an initial Pebble layer configuration
-        pebble_layer = {
-            "summary": "certbot-nginx layer",
-            "description": "Pebble config layer for certbox-nginx.",
-            "services": {
-                "nginx": {
-                    "override": "replace",
-                    "summary": "nginx",
-                    "command": "/docker-entrypoint.sh nginx -g 'daemon off;'",
-                    "startup": "enabled",
-                }
-            },
-        }
-        # Add initial Pebble config layer using the Pebble API
-        container.add_layer("certbot-nginx", pebble_layer, combine=True)
+        pebble_layer = pebble.Layer(
+            {
+                "summary": "certbot-nginx layer",
+                "description": "Pebble config layer for certbox-nginx.",
+                "services": {
+                    "nginx": {
+                        "override": "replace",
+                        "summary": "nginx",
+                        "command": "/docker-entrypoint.sh nginx -g 'daemon off;'",
+                        "startup": "enabled",
+                    }
+                },
+            }
+        )
 
-        # Autostart any services that were defined with startup: enabled
-        container.autostart()
-
-        self._refresh_charm_status(container)
+        plan = container.get_plan()
+        updated_services = plan.services != pebble_layer.services
+        if updated_services:
+            # Add initial Pebble config layer using the Pebble API
+            container.add_layer("certbot-nginx", pebble_layer, combine=True)
+            container.restart("nginx")
 
     def _on_config_changed(self, event):
         """Refreshes the service config."""
@@ -144,6 +152,9 @@ class CertbotK8sCharm(charm.CharmBase):
 
         if not self._resolve_hostname(hostname):
             raise CertbotK8sError("Cannot resolve hostname: '%s'" % hostname)
+
+        # Ensure that the Pebble layer is properly configured before continuing.
+        self._ensure_pebble_layer()
 
         if not self._check_ingress_route(hostname):
             raise CertbotK8sError("Cannot reach test file using Ingress Route.")
@@ -198,6 +209,9 @@ class CertbotK8sCharm(charm.CharmBase):
         if not container.can_connect():
             self.unit.status = model.WaitingStatus("Waiting for Pebble to be ready.")
             return False
+
+        # Ensure that the Pebble layer is properly configured.
+        self._ensure_pebble_layer(container)
 
         ingresses = self.model.relations["ingress"]
         if not ingresses:
