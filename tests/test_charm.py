@@ -259,6 +259,11 @@ class TestCertbotK8sCharm(unittest.TestCase):
         self._add_relation("ingress", "nginx-ingress-integrator", {})
         self.harness.update_config({"email": "foo@li.sh", "agree-tos": True})
 
+        # Resetting after update_config, where these may have been called.
+        mock_resolve_host.reset_mock()
+        mock_setup_ingress.reset_mock()
+        mock_check_ingress.reset_mock()
+
         mock_event = mock.Mock()
 
         with self.assertRaises(charm.CertbotK8sError) as cm:
