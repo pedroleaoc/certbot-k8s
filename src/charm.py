@@ -156,6 +156,9 @@ class CertbotK8sCharm(charm.CharmBase):
         # Ensure that the Pebble layer is properly configured before continuing.
         self._ensure_pebble_layer()
 
+        # Ensure that the test file needed to check the ingress route exists.
+        self._setup_ingress_check_file()
+
         if not self._check_ingress_route(hostname):
             raise CertbotK8sError("Cannot reach test file using Ingress Route.")
 
